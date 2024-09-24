@@ -16,7 +16,6 @@ class ZSDGFedAvgHFL:
             return None, None
 
         # ZSDG implementation with balanced labels
-        bn_layers = [layer for layer in model.layers if isinstance(layer, tf.keras.layers.BatchNormalization)]
         num_classes = model.output_shape[-1]
         samples_per_class = num_samples // num_classes
 
@@ -81,7 +80,7 @@ class ZSDGFedAvgHFL:
 
                 if self.use_zsdg:
                     fake_data, fake_labels = self.zsdg(client_model, num_samples=100)
-                    print(f"Client {i+1} generated fake data: {fake_data.shape[0]} samples, unique labels: {np.unique(fake_labels.numpy())}")
+                    print(f"Client {i+1} generated fake data: {fake_data.shape[0]} samples, unique labels: {np.unique(fake_labels)}")
                 else:
                     fake_data, fake_labels = None, None
 
