@@ -1,137 +1,155 @@
+
 import tensorflow as tf
 import numpy as np
-from keras.datasets import mnist
+from sklearn.utils import shuffle
 
-# Define a simple model with Batch Normalization using TensorFlow
-class SimpleModel(tf.keras.Model):
-    def __init__(self):
-        super(SimpleModel, self).__init__()
-        self.fc1 = tf.keras.layers.Dense(256, input_shape=(784,))
-        self.bn1 = tf.keras.layers.BatchNormalization()
-        self.fc2 = tf.keras.layers.Dense(128)
-        self.bn2 = tf.keras.layers.BatchNormalization()
-        self.fc3 = tf.keras.layers.Dense(10, activation='softmax')
-    
-    def call(self, inputs, training=False):
-        x = tf.nn.relu(self.bn1(self.fc1(inputs), training=training))
-        x = tf.nn.relu(self.bn2(self.fc2(x), training=training))
-        return self.fc3(x)
+class ZSDGFedAvgHFL:
+    def __init__(self, num_clients, model_fn, num_rounds, local_epochs):
+        self.num_clients = num_clients
+        self.model_fn = model_fn
+        self.num_rounds = num_rounds
+        self.local_epochs = local_epochs
+        self.global_model = self.model_fn()
 
-# Zero-Shot Data Generation (ZSDG) Algorithm
-def zsdg(model, num_samples, num_classes):
-    # Get batch normalization statistics from the model
-    mu_list = []
-    sigma_list = []
-    for layer in model.layers:
-        if isinstance(layer, tf.keras.layers.BatchNormalization):
-            mu_list.append(layer.moving_mean)
-            sigma_list.append(tf.sqrt(layer.moving_variance))
-    
-    # Generate synthetic data
-    fake_data = []
-    fake_labels = []
-    for _ in range(num_samples):
-        # Generate synthetic input data from Gaussian distribution
-        x_synthetic = []
-        for mu, sigma in zip(mu_list, sigma_list):
-            x_synthetic.append(tf.random.normal(shape=mu.shape, mean=mu, stddev=sigma))
-        x_synthetic = tf.concat(x_synthetic, axis=0)  # Concatenate the layers' outputs
+    def zsdg(self, model, num_samples):
+        # Get batch normalization layers
+        bn_layers = [layer for layer in model.layers if isinstance(layer, tf.keras.layers.BatchNormalization)]
         
-        # Randomly assign labels
-        y_synthetic = tf.random.uniform(shape=(1,), minval=0, maxval=num_classes, dtype=tf.int32)
+        # Generate fake data
+        fake_data = tf.Variable(tf.random.normal(shape=(num_samples,) + model.input_shape[1:]))
+        fake_labels = tf.random.uniform(shape=(num_samples,), minval=0, maxval=model.output_shape[-1], dtype=tf.int32)
         
-        fake_data.append(x_synthetic)
-        fake_labels.append(y_synthetic)
-    
-    fake_data = tf.stack(fake_data)
-    fake_labels = tf.stack(fake_labels)
-    
-    return fake_data, fake_labels
-
-# FedAvg Algorithm for Federated Learning
-def fedavg(models, global_model, client_data, client_labels, epochs=1):
-    client_weights = [model.get_weights() for model in models]
-    
-    # Averaging model weights
-    avg_weights = []
-    for weights in zip(*client_weights):
-        avg_weights.append([np.mean(w, axis=0) for w in zip(*weights)])
-    
-    # Update the global model with the averaged weights
-    global_model.set_weights(avg_weights)
-    
-    # Compile the model
-    global_model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=0.01),
-                         loss='sparse_categorical_crossentropy',
-                         metrics=['accuracy'])
-    
-    # Train global model on the aggregated data (FedAvg concept)
-    global_model.fit(client_data, client_labels, epochs=epochs)
-    
-    return global_model
-
-# Hierarchical Federated Learning (HFL)
-def hierarchical_fedavg(global_model, regional_models, clients_per_region, num_regions, num_clients, num_samples, num_classes, epochs=1):
-    # Step 1: Each client generates data using ZSDG and trains their local model
-    regional_weights = []
-    
-    for i in range(num_regions):
-        client_models = [SimpleModel() for _ in range(clients_per_region)]
-        client_data_list = []
-        client_labels_list = []
+        optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
         
-        # Generate synthetic data using ZSDG for each client
-        for j in range(clients_per_region):
-            data, labels = zsdg(client_models[j], num_samples, num_classes)
-            client_data_list.append(data)
-            client_labels_list.append(labels)
+        # Training loop
+        for _ in range(self.local_epochs):
+            with tf.GradientTape() as tape:
+                # Forward propagation
+                activations = [fake_data]
+                for layer in model.layers:
+                    activations.append(layer(activations[-1]))
+                
+                # Gather BN statistics
+                bn_stats = []
+                for layer in bn_layers:
+                    bn_stats.append((layer.moving_mean, layer.moving_variance))
+                
+                # Compute loss (placeholder - replace with actual loss calculation)
+                loss = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(fake_labels, activations[-1]))
+            
+            # Backward propagation
+            grads = tape.gradient(loss, [fake_data])
+            optimizer.apply_gradients(zip(grads, [fake_data]))
         
-        # Concatenate client data and labels within each region
-        client_data = tf.concat(client_data_list, axis=0)
-        client_labels = tf.concat(client_labels_list, axis=0)
+        return fake_data.value(), fake_labels
+
+    def client_update(self, client_model, fake_data, fake_labels):
+        for _ in range(self.local_epochs):
+            client_model.fit(fake_data, fake_labels, epochs=1, verbose=0)
+        return client_model.get_weights()
+
+    def aggregate_weights(self, client_weights):
+        avg_weights = [np.zeros_like(w) for w in client_weights[0]]
+        for client_w in client_weights:
+            for i, w in enumerate(client_w):
+                avg_weights[i] += w / self.num_clients
+        return avg_weights
+
+    def train(self):
+        for round in range(self.num_rounds):
+            print(f"Round {round + 1}/{self.num_rounds}")
+            
+            client_weights = []
+            for i in range(self.num_clients):
+                client_model = self.model_fn()
+                client_model.set_weights(self.global_model.get_weights())
+                
+                # Generate fake data using ZSDG
+                fake_data, fake_labels = self.zsdg(client_model, num_samples=100)  # Adjust num_samples as needed
+                
+                # Update client model
+                updated_weights = self.client_update(client_model, fake_data, fake_labels)
+                client_weights.append(updated_weights)
+            
+            # Aggregate weights using FedAvg
+            avg_weights = self.aggregate_weights(client_weights)
+            
+            # Update global model
+            self.global_model.set_weights(avg_weights)
         
-        # Regional server aggregates the clients' models (FedAvg within region)
-        regional_model = fedavg(client_models, regional_models[i], client_data, client_labels, epochs)
-        regional_weights.append(regional_model.get_weights())
-    
-    # Step 2: Global server aggregates the models from regional servers (FedAvg across regions)
-    avg_weights = []
-    for weights in zip(*regional_weights):
-        avg_weights.append([np.mean(w, axis=0) for w in zip(*weights)])
-    
-    global_model.set_weights(avg_weights)
-    
-    return global_model
+        return self.global_model
 
-# Testing the global model on MNIST dataset
-def test_global_model(global_model):
-    (x_train, y_train), (x_test, y_test) = mnist.load_data()
-    x_test = x_test.reshape(-1, 784) / 255.0
-    
-    # Compile and evaluate the global model on the MNIST test set
-    global_model.compile(optimizer='adam',
-                         loss='sparse_categorical_crossentropy',
-                         metrics=['accuracy'])
-    
-    test_loss, test_acc = global_model.evaluate(x_test, y_test, verbose=2)
-    print(f"Test accuracy on MNIST: {test_acc}")
+def create_model():
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(28, 28, 1)),
+        tf.keras.layers.Conv2D(32, 3, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling2D(),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.Dense(10, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
 
-# Example Usage
+def create_non_iid_mnist_data(num_clients=100, samples_per_client=100, max_labels_per_client=2):
+    # Load MNIST data
+    (x_train, y_train), _ = tf.keras.datasets.mnist.load_data()
+    x_train = x_train.astype('float32') / 255.0
+    x_train = np.expand_dims(x_train, axis=-1)
+
+    # Shuffle the data
+    x_train, y_train = shuffle(x_train, y_train)
+
+    # Create non-IID distribution
+    client_data = []
+    available_labels = list(range(10))
+    
+    for i in range(num_clients):
+        if len(available_labels) < max_labels_per_client:
+            available_labels = list(range(10))
+        
+        client_labels = np.random.choice(available_labels, max_labels_per_client, replace=False)
+        for label in client_labels:
+            available_labels.remove(label)
+        
+        client_indices = np.where(np.isin(y_train, client_labels))[0][:samples_per_client]
+        client_x = x_train[client_indices]
+        client_y = y_train[client_indices]
+        
+        client_data.append((client_x, client_y))
+    
+    return client_data
+
+def test_model(model, test_data):
+    x_test, y_test = test_data
+    loss, accuracy = model.evaluate(x_test, y_test, verbose=0)
+    return loss, accuracy
+
+# Main execution
 if __name__ == "__main__":
-    # Hyperparameters
-    num_regions = 3
-    clients_per_region = 5
-    num_clients = num_regions * clients_per_region
-    num_samples = 100  # Per client
-    num_classes = 10
-    epochs = 5
-    
-    # Initialize global model and regional models
-    global_model = SimpleModel()
-    regional_models = [SimpleModel() for _ in range(num_regions)]
-    
-    # Perform Hierarchical FedAvg
-    global_model = hierarchical_fedavg(global_model, regional_models, clients_per_region, num_regions, num_clients, num_samples, num_classes, epochs)
-    
-    # Test the global model on MNIST dataset
-    test_global_model(global_model)
+    # Create non-IID MNIST data
+    client_data = create_non_iid_mnist_data()
+
+    # Create test data (using the last 10000 samples from the original test set)
+    _, (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    x_test = x_test.astype('float32') / 255.0
+    x_test = np.expand_dims(x_test, axis=-1)
+    test_data = (x_test[-10000:], y_test[-10000:])
+
+    # Initialize federated learning
+    federated_learning = ZSDGFedAvgHFL(num_clients=100, model_fn=create_model, num_rounds=50, local_epochs=5)
+
+    # Train the model
+    final_model = federated_learning.train()
+
+    # Test the final model
+    test_loss, test_accuracy = test_model(final_model, test_data)
+    print(f"Final test loss: {test_loss:.4f}")
+    print(f"Final test accuracy: {test_accuracy:.4f}")
+
+    # Evaluate individual client performance
+    for i, (client_x, client_y) in enumerate(client_data[:5]):  # Test on first 5 clients
+        client_loss, client_accuracy = test_model(final_model, (client_x, client_y))
+        print(f"Client {i+1} - Loss: {client_loss:.4f}, Accuracy: {client_accuracy:.4f}")
