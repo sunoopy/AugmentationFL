@@ -15,13 +15,13 @@ class ZSDGFedAvgHFL:
         # Get batch normalization layers
         bn_layers = [layer for layer in model.layers if isinstance(layer, tf.keras.layers.BatchNormalization)]
         
-        # Generate fake data
+        # fake data generation
         fake_data = tf.Variable(tf.random.normal(shape=(num_samples,) + model.input_shape[1:]))
         fake_labels = tf.random.uniform(shape=(num_samples,), minval=0, maxval=model.output_shape[-1], dtype=tf.int32)
         
         optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
         
-        # Training loop
+        
         for _ in range(self.local_epochs):
             with tf.GradientTape() as tape:
                 # Forward propagation
@@ -64,17 +64,13 @@ class ZSDGFedAvgHFL:
                 client_model = self.model_fn()
                 client_model.set_weights(self.global_model.get_weights())
                 
-                # Generate fake data using ZSDG
                 fake_data, fake_labels = self.zsdg(client_model, num_samples=100)  # Adjust num_samples as needed
                 
-                # Update client model
                 updated_weights = self.client_update(client_model, fake_data, fake_labels)
                 client_weights.append(updated_weights)
             
-            # Aggregate weights using FedAvg
             avg_weights = self.aggregate_weights(client_weights)
-            
-            # Update global model
+
             self.global_model.set_weights(avg_weights)
         
         return self.global_model
@@ -94,12 +90,10 @@ def create_model():
     return model
 
 def create_non_iid_mnist_data(num_clients=100, samples_per_client=100, max_labels_per_client=2):
-    # Load MNIST data
+
     (x_train, y_train), _ = tf.keras.datasets.mnist.load_data()
     x_train = x_train.astype('float32') / 255.0
     x_train = np.expand_dims(x_train, axis=-1)
-
-    # Shuffle the data
     x_train, y_train = shuffle(x_train, y_train)
 
     # Create non-IID distribution
@@ -129,10 +123,9 @@ def test_model(model, test_data):
 
 # Main execution
 if __name__ == "__main__":
-    # Create non-IID MNIST data
+
     client_data = create_non_iid_mnist_data()
 
-    # Create test data (using the last 10000 samples from the original test set)
     _, (x_test, y_test) = tf.keras.datasets.mnist.load_data()
     x_test = x_test.astype('float32') / 255.0
     x_test = np.expand_dims(x_test, axis=-1)
@@ -141,15 +134,12 @@ if __name__ == "__main__":
     # Initialize federated learning
     federated_learning = ZSDGFedAvgHFL(num_clients=100, model_fn=create_model, num_rounds=50, local_epochs=5)
 
-    # Train the model
     final_model = federated_learning.train()
 
-    # Test the final model
     test_loss, test_accuracy = test_model(final_model, test_data)
     print(f"Final test loss: {test_loss:.4f}")
     print(f"Final test accuracy: {test_accuracy:.4f}")
 
-    # Evaluate individual client performance
     for i, (client_x, client_y) in enumerate(client_data[:5]):  # Test on first 5 clients
         client_loss, client_accuracy = test_model(final_model, (client_x, client_y))
         print(f"Client {i+1} - Loss: {client_loss:.4f}, Accuracy: {client_accuracy:.4f}")
